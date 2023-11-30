@@ -13,7 +13,7 @@ const MESSAGE_SIZE: usize = 64;
 enum ChannelMessageType {
     Connected,
     IncommingMessage,
-    ErrorMessage,
+    ErrorMessage(std::io::Error),
     Disconnected,
 }
 
@@ -87,15 +87,14 @@ fn client_handler(
                     Err(e) => eprintln!("{e}"),
                 }
 
-                //write!(stream.as_ref(), "{msg_str}")?; // echo
-
-                //stream.as_ref().flush()?;
-                //buffer.fill(0);
+                stream.as_ref().write_all(&buffer)?; // echo
+                stream.as_ref().flush()?;
+                buffer.fill(0);
             }
-            Err(_) => match sender.send(ChannelMessage::new(
+            Err(e) => match sender.send(ChannelMessage::new(
                 address,
                 None,
-                ChannelMessageType::ErrorMessage,
+                ChannelMessageType::ErrorMessage(e),
             )) {
                 Ok(_) => {}
                 Err(e) => eprintln!("{e}"),

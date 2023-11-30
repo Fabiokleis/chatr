@@ -1,56 +1,124 @@
+use std::fmt;
 use std::io::Read;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
-use std::str;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 const MESSAGE_SIZE: usize = 64;
 
-struct ChannelMessage {
-    content: String,
+#[derive(Debug)]
+enum ChannelMessageType {
+    Connected,
+    IncommingMessage,
+    ErrorMessage,
+    Disconnected,
 }
 
-fn client_handler(mut stream: TcpStream, sender: Sender<String>) -> Result<(), std::io::Error> {
+struct ChannelMessage {
+    address: SocketAddr,
+    message_type: ChannelMessageType,
+    content: Option<[u8; MESSAGE_SIZE]>,
+}
+
+impl ChannelMessage {
+    fn new(
+        address: SocketAddr,
+        content: Option<[u8; MESSAGE_SIZE]>,
+        message_type: ChannelMessageType,
+    ) -> Self {
+        Self {
+            address,
+            message_type,
+            content,
+        }
+    }
+}
+
+impl fmt::Display for ChannelMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} {:?} {:?}",
+            self.address, self.message_type, self.content
+        )
+    }
+}
+
+fn client_handler(
+    stream: Arc<TcpStream>,
+    sender: Sender<ChannelMessage>,
+) -> Result<(), std::io::Error> {
     let mut buffer = [0; MESSAGE_SIZE];
 
+    let address = stream.peer_addr().unwrap();
+
+    match sender.send(ChannelMessage::new(
+        address,
+        None,
+        ChannelMessageType::Connected,
+    )) {
+        Ok(_) => {}
+        Err(e) => eprintln!("{e}"),
+    }
+
     'handle: loop {
-        match stream.read(&mut buffer) {
+        match stream.as_ref().read(&mut buffer) {
             Ok(0) => {
-                println!("{:?} closed connection", stream);
+                match sender.send(ChannelMessage::new(
+                    address,
+                    None,
+                    ChannelMessageType::Disconnected,
+                )) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{e}"),
+                }
                 break 'handle;
             }
-            Ok(n) => {
-                let msg_str = str::from_utf8(&buffer).expect("Could not parse message as str utf8");
+            Ok(_) => {
+                match sender.send(ChannelMessage::new(
+                    address,
+                    Some(buffer),
+                    ChannelMessageType::IncommingMessage,
+                )) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{e}"),
+                }
 
-                write!(stream, "{msg_str}")?; // echo
-                print!("{:?} <{n}> {msg_str}", stream);
+                //write!(stream.as_ref(), "{msg_str}")?; // echo
 
-                stream.flush()?;
-                buffer.fill(0);
+                //stream.as_ref().flush()?;
+                //buffer.fill(0);
             }
-            Err(e) => {
-                sender
-                    .send(format!("Could not read from {:?}, err: {e}", stream))
-                    .unwrap();
-            }
+            Err(_) => match sender.send(ChannelMessage::new(
+                address,
+                None,
+                ChannelMessageType::ErrorMessage,
+            )) {
+                Ok(_) => {}
+                Err(e) => eprintln!("{e}"),
+            },
         }
     }
 
     Ok(())
 }
 
-fn server_handler(receiver: Receiver<String>) {
-    match receiver.recv() {
-        Ok(msg) => println!("{msg}"),
-        Err(e) => eprintln!("{e}"),
+fn server_handler(receiver: Receiver<ChannelMessage>) {
+    loop {
+        match receiver.recv() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => eprintln!("{e}"),
+        }
     }
 }
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8123")?;
 
-    let (sender, receiver) = channel::<String>();
+    let (sender, receiver) = channel::<ChannelMessage>();
 
     thread::spawn(move || server_handler(receiver));
 
@@ -58,7 +126,7 @@ fn main() -> std::io::Result<()> {
         match stream {
             Ok(st) => {
                 let sender = sender.clone();
-                thread::spawn(move || client_handler(st, sender));
+                thread::spawn(move || client_handler(Arc::new(st), sender));
             }
             Err(e) => {
                 eprintln!("Could not connect client to listener 127.0.0.1:8123, err: {e}")

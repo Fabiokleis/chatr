@@ -13,7 +13,7 @@ use std::thread;
 const MESSAGE_SIZE: usize = 32;
 const RANDOM_ID_LENGTH: usize = 8;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ChannelMessageType {
     Connected(Arc<TcpStream>),
     IncomingMessage,
@@ -21,6 +21,7 @@ enum ChannelMessageType {
     ErrorMessage,
 }
 
+#[derive(Clone)]
 struct ChannelMessage {
     address: SocketAddr,
     message_type: ChannelMessageType,
@@ -61,18 +62,6 @@ impl Client {
             address,
             messages: Vec::new(),
             stream,
-        }
-    }
-
-    fn shell_format(&self, lf: bool) {
-        let shell_format = if lf {
-            format!("{}@{}$ \n", self.name, self.address)
-        } else {
-            format!("{}@{}$ ", self.name, self.address)
-        };
-        match self.stream.as_ref().write(shell_format.as_bytes()) {
-            Ok(_) => {}
-            Err(e) => eprintln!("ERROR: {e}"),
         }
     }
 }
@@ -167,13 +156,11 @@ fn server_handler(receiver: Receiver<ChannelMessage>) {
                     );
                 }
                 ChannelMessageType::IncomingMessage => {
+                    broadcast_message(msg.clone(), &clients);
                     if let Some(user) = clients.get_mut(&msg.address.to_string()) {
                         user.messages.push(msg.content);
-                        user.shell_format(false);
-                        println!("INFO: {user}");
-                    }
-                    let user = clients.get(&msg.address.to_string()).unwrap();
-                    broadcast_message(user, &clients)
+                        println!("INFO: {}", user);
+                    };
                 }
                 ChannelMessageType::Disconnected => {
                     if let Some(user) = clients.remove(&msg.address.to_string()) {
@@ -189,16 +176,13 @@ fn server_handler(receiver: Receiver<ChannelMessage>) {
     }
 }
 
-fn broadcast_message(broadcaster: &Client, clients: &HashMap<String, Client>) {
+fn broadcast_message(msg: ChannelMessage, clients: &HashMap<String, Client>) {
     for (_, c) in clients.iter() {
-        if c.address != broadcaster.address {
-            if let Some(message) = broadcaster.messages.last() {
-                c.shell_format(true);
-                match c.stream.as_ref().write_all(message) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("{e}")
-                    }
+        if c.address != msg.address {
+            match c.stream.as_ref().write_all(&msg.content) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{e}")
                 }
             }
         }

@@ -15,27 +15,20 @@ const RANDOM_ID_LENGTH: usize = 8;
 
 #[derive(Debug)]
 enum ChannelMessageType {
-    Connected,
-    IncommingMessage,
+    Connected(Arc<TcpStream>),
+    IncomingMessage,
     Disconnected,
-}
-
-enum ChannelMessageError<T> {
-    ErrorMessage(T),
+    ErrorMessage,
 }
 
 struct ChannelMessage {
     address: SocketAddr,
     message_type: ChannelMessageType,
-    content: Option<[u8; MESSAGE_SIZE]>,
+    content: Vec<u8>,
 }
 
 impl ChannelMessage {
-    fn new(
-        address: SocketAddr,
-        content: Option<[u8; MESSAGE_SIZE]>,
-        message_type: ChannelMessageType,
-    ) -> Self {
+    fn new(address: SocketAddr, content: Vec<u8>, message_type: ChannelMessageType) -> Self {
         Self {
             address,
             message_type,
@@ -57,15 +50,29 @@ impl fmt::Display for ChannelMessage {
 struct Client {
     name: String,
     address: SocketAddr,
-    messages: Vec<[u8; MESSAGE_SIZE]>,
+    stream: Arc<TcpStream>,
+    messages: Vec<Vec<u8>>,
 }
 
 impl Client {
-    fn new(name: String, address: SocketAddr) -> Self {
+    fn new(name: String, address: SocketAddr, stream: Arc<TcpStream>) -> Self {
         Client {
             name,
             address,
             messages: Vec::new(),
+            stream,
+        }
+    }
+
+    fn shell_format(&self, lf: bool) {
+        let shell_format = if lf {
+            format!("{}@{}$ \n", self.name, self.address)
+        } else {
+            format!("{}@{}$ ", self.name, self.address)
+        };
+        match self.stream.as_ref().write(shell_format.as_bytes()) {
+            Ok(_) => {}
+            Err(e) => eprintln!("ERROR: {e}"),
         }
     }
 }
@@ -77,7 +84,7 @@ impl fmt::Display for Client {
             "[{}] {} sent {:?}",
             self.address,
             self.name,
-            self.messages.last()
+            self.messages.last().unwrap()
         )
     }
 }
@@ -93,7 +100,6 @@ fn generate_client_id(length: usize) -> String {
 fn client_handler(
     stream: Arc<TcpStream>,
     sender: Sender<ChannelMessage>,
-    error_sender: Sender<ChannelMessageError<std::io::Error>>,
 ) -> Result<(), std::io::Error> {
     let mut buffer = [0; MESSAGE_SIZE];
 
@@ -101,8 +107,8 @@ fn client_handler(
 
     match sender.send(ChannelMessage::new(
         address,
-        None,
-        ChannelMessageType::Connected,
+        vec![],
+        ChannelMessageType::Connected(Arc::clone(&stream)),
     )) {
         Ok(_) => {}
         Err(e) => eprintln!("{e}"),
@@ -113,7 +119,7 @@ fn client_handler(
             Ok(0) => {
                 match sender.send(ChannelMessage::new(
                     address,
-                    None,
+                    vec![],
                     ChannelMessageType::Disconnected,
                 )) {
                     Ok(_) => {}
@@ -124,18 +130,22 @@ fn client_handler(
             Ok(_) => {
                 match sender.send(ChannelMessage::new(
                     address,
-                    Some(buffer),
-                    ChannelMessageType::IncommingMessage,
+                    Vec::from(buffer),
+                    ChannelMessageType::IncomingMessage,
                 )) {
                     Ok(_) => {}
                     Err(e) => eprintln!("{e}"),
                 }
 
-                stream.as_ref().write_all(&buffer)?; // echo
+                //stream.as_ref().write_all(&buffer)?; // echo
                 stream.as_ref().flush()?;
                 buffer.fill(0);
             }
-            Err(e) => match error_sender.send(ChannelMessageError::ErrorMessage(e)) {
+            Err(err) => match sender.send(ChannelMessage::new(
+                address,
+                err.to_string().into_bytes(),
+                ChannelMessageType::ErrorMessage,
+            )) {
                 Ok(_) => {}
                 Err(e) => eprintln!("{e}"),
             },
@@ -150,22 +160,28 @@ fn server_handler(receiver: Receiver<ChannelMessage>) {
     loop {
         match receiver.recv() {
             Ok(msg) => match msg.message_type {
-                ChannelMessageType::Connected => {
+                ChannelMessageType::Connected(socket) => {
                     clients.insert(
                         msg.address.to_string(),
-                        Client::new(generate_client_id(RANDOM_ID_LENGTH), msg.address),
+                        Client::new(generate_client_id(RANDOM_ID_LENGTH), msg.address, socket),
                     );
                 }
-                ChannelMessageType::IncommingMessage => {
+                ChannelMessageType::IncomingMessage => {
                     if let Some(user) = clients.get_mut(&msg.address.to_string()) {
-                        user.messages.push(msg.content.unwrap());
+                        user.messages.push(msg.content);
+                        user.shell_format(false);
                         println!("INFO: {user}");
                     }
+                    let user = clients.get(&msg.address.to_string()).unwrap();
+                    broadcast_message(user, &clients)
                 }
                 ChannelMessageType::Disconnected => {
                     if let Some(user) = clients.remove(&msg.address.to_string()) {
                         println!("INFO: {msg} {}", user.name);
                     }
+                }
+                ChannelMessageType::ErrorMessage => {
+                    eprintln!("ERROR: {msg}")
                 }
             },
             Err(e) => eprintln!("{e}"),
@@ -173,11 +189,18 @@ fn server_handler(receiver: Receiver<ChannelMessage>) {
     }
 }
 
-fn server_error_handler<T: fmt::Display>(receiver: Receiver<ChannelMessageError<T>>) {
-    loop {
-        match receiver.recv() {
-            Ok(ChannelMessageError::ErrorMessage(err)) => eprintln!("{err}"),
-            Err(e) => eprintln!("{e}"),
+fn broadcast_message(broadcaster: &Client, clients: &HashMap<String, Client>) {
+    for (_, c) in clients.iter() {
+        if c.address != broadcaster.address {
+            if let Some(message) = broadcaster.messages.last() {
+                c.shell_format(true);
+                match c.stream.as_ref().write_all(message) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("{e}")
+                    }
+                }
+            }
         }
     }
 }
@@ -186,17 +209,14 @@ fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6969")?;
 
     let (sender, receiver) = channel::<ChannelMessage>();
-    let (sender_error, receiver_error) = channel::<ChannelMessageError<std::io::Error>>();
 
     thread::spawn(move || server_handler(receiver));
-    thread::spawn(move || server_error_handler(receiver_error));
 
     for stream in listener.incoming() {
         match stream {
             Ok(st) => {
                 let sender = sender.clone();
-                let sender_error = sender_error.clone();
-                thread::spawn(move || client_handler(Arc::new(st), sender, sender_error));
+                thread::spawn(move || client_handler(Arc::new(st), sender));
             }
             Err(e) => {
                 eprintln!("Could not connect client to listener 127.0.0.1:8123, err: {e}")

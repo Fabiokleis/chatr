@@ -1,8 +1,8 @@
-# rust-net
+# chatr
 
 Exploring Rust std::net crate https://doc.rust-lang.org/std/net/index.html
 
-The project starts a tcp echo server listening to port 8123 and multiple connections are handle.
+The project starts a tcp server listening to port 6969 and handle multiple client connections.
 
 ### Run
 To start server

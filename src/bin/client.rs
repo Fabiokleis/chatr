@@ -1,8 +1,9 @@
+use chatr::Message;
+use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
 use std::process::exit;
 use std::string::ToString;
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 fn usage() {
@@ -22,36 +23,30 @@ impl ToString for Server {
     }
 }
 
-fn stdout_receiver(rec: Receiver<String>, mut stdout: std::io::Stdout) {
+fn server_message_handler(conn: Arc<TcpStream>) {
+    let mut buffer = String::new();
+    let mut reader = BufReader::new(conn.as_ref());
     loop {
-        match rec.recv() {
-            Ok(msg) => {
-                if msg == "closed" {
-                    break;
-                }
-                let _ = stdout.write_all(msg.as_bytes());
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                exit(1);
-            }
-        }
-    }
-}
-
-fn server_message_handler(conn: Arc<TcpStream>, sender: Sender<String>) {
-    let mut bytes = [0; 32];
-    loop {
-        match conn.as_ref().read(&mut bytes) {
+        match reader.read_line(&mut buffer) {
             Ok(0) => {
-                let _ = sender.send("closed".to_string());
+                println!("server down");
                 break;
             }
             Ok(_) => {
-                if let Ok(buff) = String::from_utf8(bytes.to_vec()) {
-                    let _ = sender.send(buff);
+                let bytes = buffer.as_bytes();
+                match serde_json::from_slice::<Message>(bytes) {
+                    Ok(message) => {
+                        print!(
+                            "{}@{}# {}",
+                            message.author.name, message.author.address, message.content
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("{e}")
+                    }
                 }
-                bytes.fill(0);
+                reader.consume(buffer.len());
+                buffer.clear();
             }
             Err(e) => {
                 eprintln!("{e}");
@@ -62,15 +57,12 @@ fn server_message_handler(conn: Arc<TcpStream>, sender: Sender<String>) {
 }
 
 fn handle_connection(conn: TcpStream) {
-    let stdout = std::io::stdout();
     let mut buff = String::new();
 
     let stream = Arc::new(conn);
     let stream1 = Arc::clone(&stream);
-    let (sender, receiver) = channel::<String>();
 
-    std::thread::spawn(move || stdout_receiver(receiver, stdout));
-    std::thread::spawn(move || server_message_handler(stream, sender));
+    std::thread::spawn(move || server_message_handler(stream));
 
     loop {
         match std::io::stdin().read_line(&mut buff) {

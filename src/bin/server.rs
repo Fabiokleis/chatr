@@ -1,3 +1,4 @@
+use chatr::Message;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::collections::HashMap;
@@ -177,10 +178,23 @@ fn server_handler(receiver: Receiver<ChannelMessage>) {
 }
 
 fn broadcast_message(msg: ChannelMessage, clients: &HashMap<String, Client>) {
+    let mut name: Option<String> = None;
+    if let Some(client) = clients.get(&msg.address.to_string()) {
+        name = Some(client.name.clone());
+    }
     for (_, c) in clients.iter() {
         if c.address != msg.address {
-            match c.stream.as_ref().write_all(&msg.content) {
-                Ok(_) => {}
+            let message = Message::new(
+                name.clone().unwrap_or("UNKNOWN".to_string()),
+                msg.address.to_string(),
+                String::from_utf8(msg.content.clone()).unwrap(),
+            );
+
+            let serialized = serde_json::to_vec(&message).unwrap();
+            match c.stream.as_ref().write_all(&serialized[..]) {
+                Ok(_) => {
+                    let _ = c.stream.as_ref().write(&[b'\n']);
+                }
                 Err(e) => {
                     eprintln!("{e}")
                 }
